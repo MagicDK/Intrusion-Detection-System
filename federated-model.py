@@ -6,9 +6,6 @@ from scipy.io import arff
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 
-# Load and preprocess dataset
-# Assumes the dataset is in the same format as used in the centralized model
-
 def load_data(train_path, test_path):
     train_arff = arff.loadarff(train_path)
     test_arff = arff.loadarff(test_path)
@@ -98,20 +95,8 @@ def model_fn():
         metrics=[tf.keras.metrics.BinaryAccuracy()]
     )
 
-# Load and preprocess data
+# Load data
 train_df, test_df = load_data("KDDTrain+.arff", "KDDTest+.arff")
-#print("Raw training columns:", train_df.columns.tolist())
-#print("Raw test columns:", test_df.columns.tolist())
-
-#print("Actual columns:", [f"'{col}'" for col in train_df.columns])
-#train_df = train_df.rename(columns={'class ': 'class'})
-
-#print("\n=== DATA VALIDATION ===")
-#print("Train columns:", train_df.columns.tolist())
-#print("Test columns:", test_df.columns.tolist())
-#print("'class' in train?", 'class' in train_df.columns)
-#print("'class' in test?", 'class' in test_df.columns)
-#print("Sample class values:", train_df['class'].head(3))
 
 # Preprocess training data (fit=True)
 X_train, y_train, scaler, label_encoder, feature_columns = preprocess_data(train_df, fit=True)
@@ -143,13 +128,34 @@ for round_num in range(10):  # Simulating 10 communication rounds
     state, metrics = trainer.next(state, federated_train_data)
     print(f'Round {round_num+1}, Metrics: {metrics}')
 
-# Test 1 round
-#state = trainer.initialize()
-#result = trainer.next(state, federated_train_data)
-#print("Round 1 metrics:", result.metrics)  # Check for loss/accuracy
+# 1. Extract weights from the trained TFF state
+# For TFF 0.87.0, the weights are stored as a list of lists
+tff_weights = state.global_model_weights
 
 # Evaluating the trained model
-#central_model = create_keras_model()
-#central_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-#central_model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=1)
-#print("Evaluation on test data:", central_model.evaluate(X_test, y_test))
+print("Training Class Balance:", np.unique(y_train, return_counts=True))
+print("Test Class Balance:", np.unique(y_test, return_counts=True))
+
+# 2. Create and compile your Keras model
+central_model = create_keras_model(X_train.shape[1])
+central_model.compile(loss='binary_crossentropy', 
+                     metrics=['accuracy', 
+                             tf.keras.metrics.Precision(name='precision'),
+                             tf.keras.metrics.Recall(name='recall')])
+
+# 3. Convert and assign weights (special handling for TFF 0.87.0 structure)
+if isinstance(tff_weights[0], list):
+    # Handle nested list structure in TFF 0.87+
+    flat_weights = [item for sublist in tff_weights for item in sublist]
+else:
+    flat_weights = tff_weights
+
+# Assign weights to Keras model
+central_model.set_weights([w.numpy() if hasattr(w, 'numpy') else w for w in flat_weights])
+
+# 4. Run evaluation
+print("\n=== Test Set Evaluation ===")
+results = central_model.evaluate(X_test, y_test, verbose=0)
+print(f"Accuracy: {results[1]:.4f}")
+print(f"Precision: {results[2]:.4f}")  # Crucial for anomaly detection
+print(f"Recall: {results[3]:.4f}")     # Attack detection rate
